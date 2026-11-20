@@ -134,12 +134,21 @@ function micFn() {
   };
 }
 
+var extraCss = "<style>.bar textarea{flex:1;background:transparent;border:0;outline:0;color:var(--text);font-size:16px;font-family:inherit;line-height:1.4;padding:10px 6px;min-width:0;resize:none;max-height:220px;overflow-y:auto}.bar textarea::placeholder{color:var(--muted)}</style>";
+
+var growJs = "<script>(function(){var t=document.getElementById('question');if(!t||t.tagName!=='TEXTAREA')return;var last='';function g(){t.style.height='auto';t.style.height=Math.min(t.scrollHeight,220)+'px';}t.addEventListener('input',function(){last=t.value;g();});setInterval(function(){if(t.value!==last){last=t.value;g();}},250);g();})();<\/script>";
+
 fetch(API, { method: "POST", body: JSON.stringify({ fn: "__page" }) })
   .then(function (r) { return r.json(); })
   .then(function (d) {
     if (!d.html) throw new Error("no page");
+    var page = d.html;
+    page = page.replace(/<input\s+type="text"\s+id="question"[^>]*>/i,
+      '<textarea id="question" rows="1" placeholder="Ask Sarah anything" maxlength="5000"></textarea>');
+    page = page.replace(/input\.addEventListener\(\s*["']keydown["']\s*,\s*function\s*\(\s*e\s*\)\s*\{\s*if\s*\(\s*e\.key\s*===\s*["']Enter["']\s*\)\s*sendQuestion\(\)\s*;?\s*\}\s*\)\s*;?/,
+      'input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendQuestion(); } });');
     var html = "<script>(" + shimFn.toString() + ")(" + JSON.stringify(API) + ");<\/script>" +
-      d.html +
+      page + extraCss + growJs +
       "<script>window.addEventListener('load'," + micFn.toString() + ");<\/script>";
     document.open();
     document.write(html);
