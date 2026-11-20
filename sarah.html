@@ -35,9 +35,9 @@ function shimFn(API) {
 }
 
 function micFn() {
+  var AC = window.AudioContext || window.webkitAudioContext;
   var inp = document.querySelector("textarea") || document.querySelector('input[type="text"], input:not([type])');
-  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!inp || !SR) return;
+  if (!inp || !AC || !navigator.mediaDevices) return;
   var bar = inp.parentElement;
   var btns = bar.querySelectorAll("button");
   var send = btns.length ? btns[btns.length - 1] : null;
@@ -50,34 +50,87 @@ function micFn() {
   var note = document.createElement("div");
   note.style.cssText = "position:fixed;left:0;right:0;top:4px;text-align:center;font:12px sans-serif;color:#9fb0d0;pointer-events:none;z-index:9999";
   document.body.appendChild(note);
-  var rec = new SR(), want = false, base = "", hadErr = false;
-  rec.lang = "en-US";
-  rec.interimResults = true;
+
+  var stream = null, ctx = null, proc = null, src = null, chunks = [], rate = 48000;
+  var recording = false, busy = false, base = "", timer = null;
+
   function put(v) { inp.value = v; inp.dispatchEvent(new Event("input", { bubbles: true })); }
-  rec.onstart = function () {
-    hadErr = false;
+  function reset() { mic.textContent = "🎤"; mic.style.background = "#2c3d63"; busy = false; }
+
+  function toWav(samples, inRate) {
+    var outRate = 16000, ratio = inRate / outRate;
+    var n = Math.floor(samples.length / ratio);
+    var buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+    function s(o, str) { for (var k = 0; k < str.length; k++) v.setUint8(o + k, str.charCodeAt(k)); }
+    s(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); s(8, "WAVE"); s(12, "fmt ");
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, outRate, true); v.setUint32(28, outRate * 2, true);
+    v.setUint16(32, 2, true); v.setUint16(34, 16, true); s(36, "data"); v.setUint32(40, n * 2, true);
+    for (var i = 0; i < n; i++) {
+      var a = Math.floor(i * ratio), b = Math.min(samples.length, Math.floor((i + 1) * ratio)), sum = 0, c = 0;
+      for (var j = a; j < b; j++) { sum += samples[j]; c++; }
+      var x = c ? sum / c : 0;
+      x = Math.max(-1, Math.min(1, x));
+      v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7FFF, true);
+    }
+    return new Blob([buf], { type: "audio/wav" });
+  }
+
+  async function start() {
+    try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (x) {}
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    } catch (e) { note.textContent = "The microphone is blocked. Please allow the microphone."; return; }
+    ctx = new AC();
+    if (ctx.state === "suspended") { try { await ctx.resume(); } catch (x) {} }
+    rate = ctx.sampleRate;
+    src = ctx.createMediaStreamSource(stream);
+    proc = ctx.createScriptProcessor(4096, 1, 1);
+    chunks = [];
+    proc.onaudioprocess = function (e) { chunks.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
+    src.connect(proc);
+    proc.connect(ctx.destination);
+    base = inp.value.trim();
+    recording = true;
+    mic.textContent = "⏹";
     mic.style.background = "#e5484d";
-    note.textContent = "Listening... tap the microphone again when you finish";
-  };
-  rec.onresult = function (e) {
-    var t = "";
-    for (var i = 0; i < e.results.length; i++) t += e.results[i][0].transcript;
-    put((base ? base + " " : "") + t);
-  };
-  rec.onerror = function (e) {
-    if (e.error === "no-speech" || e.error === "aborted") return;
-    hadErr = true; want = false;
-    note.textContent = "Microphone error: " + e.error;
-  };
-  rec.onend = function () {
-    if (want) { base = inp.value.trim(); try { rec.start(); } catch (x) {} return; }
-    mic.style.background = "#2c3d63";
-    if (!hadErr) note.textContent = inp.value.trim() ? "Tap the send arrow when ready." : "";
-  };
+    note.textContent = "Recording... speak clearly, then tap the square when you finish";
+    timer = setTimeout(function () { if (recording) stop(); }, 60000);
+  }
+
+  function stop() {
+    recording = false;
+    clearTimeout(timer);
+    try { proc.disconnect(); src.disconnect(); } catch (x) {}
+    try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (x) {}
+    try { ctx.close(); } catch (x) {}
+    busy = true;
+    mic.textContent = "…";
+    note.textContent = "Understanding what you said...";
+    var total = 0, i;
+    for (i = 0; i < chunks.length; i++) total += chunks[i].length;
+    if (total < rate * 0.4) { reset(); note.textContent = "That was too short. Please try again."; return; }
+    var all = new Float32Array(total), pos = 0;
+    for (i = 0; i < chunks.length; i++) { all.set(chunks[i], pos); pos += chunks[i].length; }
+    var fr = new FileReader();
+    fr.onload = function () {
+      var b64 = String(fr.result).split(",")[1];
+      google.script.run
+        .withSuccessHandler(function (res) {
+          reset();
+          var t = res && res.text ? String(res.text).trim() : "";
+          if (t) { put((base ? base + " " : "") + t); note.textContent = "Tap the send arrow when ready."; }
+          else { note.textContent = "I could not hear you clearly. Please try again, a little closer to the microphone."; }
+        })
+        .withFailureHandler(function () { reset(); note.textContent = "Could not understand the audio. Please try again."; })
+        .transcribeAudio(b64, "audio/wav");
+    };
+    fr.readAsDataURL(toWav(all, rate));
+  }
+
   mic.onclick = function () {
-    if (want) { want = false; rec.stop(); return; }
-    want = true; base = inp.value.trim();
-    try { rec.start(); } catch (x) {}
+    if (busy) return;
+    if (recording) stop(); else start();
   };
 }
 
