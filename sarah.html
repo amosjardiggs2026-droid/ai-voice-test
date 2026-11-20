@@ -4,126 +4,97 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sarah AI</title>
-<style>
-*{box-sizing:border-box}
-body{margin:0;height:100dvh;display:flex;flex-direction:column;background:#0f1b33;color:#fff;font-family:sans-serif}
-#chat{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px}
-.m{max-width:85%;padding:10px 14px;border-radius:14px;line-height:1.4;white-space:pre-wrap}
-.u{align-self:flex-end;background:#f5b333;color:#1a1a1a}
-.s{align-self:flex-start;background:#1c2a4a}
-#st{font-size:12px;color:#9fb0d0;padding:0 16px 6px;min-height:20px}
-#bar{display:flex;gap:8px;padding:12px;background:#16233f;align-items:center}
-#q{flex:1;padding:12px 16px;border-radius:24px;border:1px solid #2c3d63;background:#1c2a4a;color:#fff;font-size:16px;outline:none}
-button{border:0;border-radius:50%;width:46px;height:46px;font-size:20px;cursor:pointer}
-#mic,#spk{background:#2c3d63;color:#fff}
-#mic.on{background:#e5484d}
-#send{background:#f5b333;color:#1a1a1a}
-</style>
+<style>body{margin:0;background:#0f1b33;color:#fff;font-family:sans-serif;padding:24px}</style>
 </head>
 <body>
-<div id="chat"></div>
-<div id="st"></div>
-<div id="bar">
-  <input id="q" placeholder="Ask Sarah anything" autocomplete="off">
-  <button id="spk" title="Read answers aloud">🔊</button>
-  <button id="mic" title="Speak">🎤</button>
-  <button id="send" title="Send">↑</button>
-</div>
+<p id="msg">Loading Sarah...</p>
 <script>
 var API = "https://script.google.com/macros/s/AKfycbwdVMu1S09SCiLfGuRbagysR5Nc167Yf4mIqqfXIalhekXw4ZNYG3Oo1u_E6att__4D/exec";
-var chat = document.getElementById("chat");
-var q = document.getElementById("q");
-var st = document.getElementById("st");
-var mic = document.getElementById("mic");
-var spk = document.getElementById("spk");
-var speakOn = true;
-var hasTTS = "speechSynthesis" in window;
 
-function add(text, cls) {
-  var d = document.createElement("div");
-  d.className = "m " + cls;
-  d.textContent = text;
-  chat.appendChild(d);
-  chat.scrollTop = chat.scrollHeight;
-  return d;
-}
-
-function speak(t) {
-  if (!speakOn || !hasTTS) return;
-  window.speechSynthesis.cancel();
-  var clean = String(t).replace(/[*#_`>]/g, "").replace(/\s+/g, " ");
-  var u = new SpeechSynthesisUtterance(clean);
-  u.lang = "en-US";
-  window.speechSynthesis.speak(u);
-}
-
-spk.onclick = function () {
-  speakOn = !speakOn;
-  spk.textContent = speakOn ? "🔊" : "🔇";
-  if (!speakOn && hasTTS) window.speechSynthesis.cancel();
-};
-
-async function ask(text) {
-  text = (text || "").trim();
-  if (!text) return;
-  if (hasTTS) window.speechSynthesis.cancel();
-  q.value = "";
-  st.textContent = "";
-  add(text, "u");
-  var w = add("Sarah is thinking...", "s");
-  try {
-    var r = await fetch(API, {
-      method: "POST",
-      body: JSON.stringify({ action: "text", question: text, role: "student", history: [] })
+function shimFn(API) {
+  function make(ok, fail) {
+    return new Proxy({}, {
+      get: function (t, name) {
+        if (name === "withSuccessHandler") return function (f) { return make(f, fail); };
+        if (name === "withFailureHandler") return function (f) { return make(ok, f); };
+        if (name === "withUserObject") return function () { return make(ok, fail); };
+        return function () {
+          var args = Array.prototype.slice.call(arguments);
+          fetch(API, { method: "POST", body: JSON.stringify({ fn: name, args: args }) })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+              if (d && d.error) { if (fail) fail(new Error(d.error)); }
+              else if (ok) ok(d);
+            })
+            .catch(function (e) { if (fail) fail(e); });
+        };
+      }
     });
-    var data = await r.json();
-    if (data.answer) {
-      w.textContent = data.answer;
-      speak(data.answer);
-    } else {
-      w.textContent = "No answer received.";
-    }
-  } catch (e) {
-    w.textContent = "I cannot reach Sarah's server. Check that the deployment access is set to Anyone.";
   }
+  window.google = { script: { run: make(null, null), host: { close: function () {}, setHeight: function () {} } } };
 }
 
-document.getElementById("send").onclick = function () { ask(q.value); };
-q.addEventListener("keydown", function (e) { if (e.key === "Enter") ask(q.value); });
-
-var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-var rec = null, listening = false, hadErr = false;
-if (!SR) {
-  mic.style.display = "none";
-  st.textContent = "Voice is not supported in this browser. Please use Chrome.";
-} else {
-  rec = new SR();
+function micFn() {
+  var inp = document.querySelector("textarea") || document.querySelector('input[type="text"], input:not([type])');
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!inp || !SR) return;
+  var bar = inp.parentElement;
+  var btns = bar.querySelectorAll("button");
+  var send = btns.length ? btns[btns.length - 1] : null;
+  var mic = document.createElement("button");
+  mic.type = "button";
+  mic.textContent = "🎤";
+  mic.title = "Speak";
+  mic.style.cssText = "flex:none;width:38px;height:38px;border:0;border-radius:50%;background:#2c3d63;color:#fff;font-size:18px;margin:0 6px;cursor:pointer";
+  if (send && send.parentElement === bar) bar.insertBefore(mic, send); else bar.appendChild(mic);
+  var note = document.createElement("div");
+  note.style.cssText = "position:fixed;left:0;right:0;top:4px;text-align:center;font:12px sans-serif;color:#9fb0d0;pointer-events:none;z-index:9999";
+  document.body.appendChild(note);
+  var rec = new SR(), want = false, base = "", hadErr = false;
   rec.lang = "en-US";
   rec.interimResults = true;
+  function put(v) { inp.value = v; inp.dispatchEvent(new Event("input", { bubbles: true })); }
   rec.onstart = function () {
-    listening = true; hadErr = false;
-    mic.classList.add("on");
-    st.textContent = "Listening... speak now";
+    hadErr = false;
+    mic.style.background = "#e5484d";
+    note.textContent = "Listening... tap the microphone again when you finish";
   };
   rec.onresult = function (e) {
     var t = "";
     for (var i = 0; i < e.results.length; i++) t += e.results[i][0].transcript;
-    q.value = t;
+    put((base ? base + " " : "") + t);
   };
-  rec.onerror = function (e) { hadErr = true; st.textContent = "Microphone error: " + e.error; };
+  rec.onerror = function (e) {
+    if (e.error === "no-speech" || e.error === "aborted") return;
+    hadErr = true; want = false;
+    note.textContent = "Microphone error: " + e.error;
+  };
   rec.onend = function () {
-    listening = false;
-    mic.classList.remove("on");
-    if (!hadErr) st.textContent = q.value.trim() ? "Tap the yellow arrow to send." : "";
+    if (want) { base = inp.value.trim(); try { rec.start(); } catch (x) {} return; }
+    mic.style.background = "#2c3d63";
+    if (!hadErr) note.textContent = inp.value.trim() ? "Tap the send arrow when ready." : "";
   };
   mic.onclick = function () {
-    if (listening) { rec.stop(); return; }
-    if (hasTTS) window.speechSynthesis.cancel();
-    try { rec.start(); } catch (e) {}
+    if (want) { want = false; rec.stop(); return; }
+    want = true; base = inp.value.trim();
+    try { rec.start(); } catch (x) {}
   };
 }
 
-add("Hello, I am Sarah. Type your question, or tap the microphone and speak. Then tap the yellow arrow to send.", "s");
+fetch(API, { method: "POST", body: JSON.stringify({ fn: "__page" }) })
+  .then(function (r) { return r.json(); })
+  .then(function (d) {
+    if (!d.html) throw new Error("no page");
+    var html = "<script>(" + shimFn.toString() + ")(" + JSON.stringify(API) + ");<\/script>" +
+      d.html +
+      "<script>window.addEventListener('load'," + micFn.toString() + ");<\/script>";
+    document.open();
+    document.write(html);
+    document.close();
+  })
+  .catch(function () {
+    document.getElementById("msg").textContent = "Cannot load Sarah. Check that the deployment access is set to Anyone.";
+  });
 </script>
 </body>
 </html>
