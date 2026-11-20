@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mic Test</title>
+</head>
+<body style="font-family:sans-serif;padding:20px">
+<h2>Microphone test</h2>
+<button id="b" style="font-size:20px;padding:12px">🎤 Tap and speak</button>
+<p id="o">Waiting...</p>
+<script>
+const R = window.SpeechRecognition || window.webkitSpeechRecognition;
+const o = document.getElementById("o");
+if (!R) { o.textContent = "Speech recognition not supported here."; }
+else {
+  const r = new R();
+  r.lang = "en-US";
+  r.onresult = e => o.textContent = "I heard: " + e.results[0][0].transcript;
+  r.onerror = e => o.textContent = "Error: " + e.error;
+  document.getElementById("b").onclick = () => { o.textContent = "Listening..."; r.start(); };
+}
+</script>
+</body>
+  </html>
