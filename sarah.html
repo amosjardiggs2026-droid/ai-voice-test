@@ -136,10 +136,6 @@ function micFn() {
 }
 
 function voiceFn() {
-  var STYLES = {
-    "1": "Speak as a small, sweet Liberian girl about 6 years old. Use a natural Liberian English accent, like a child from Monrovia. Relaxed, melodic rhythm, rounded vowels, not American and not British. Warm and simple. Not too fast. Say:",
-    "2": "Speak as a small Liberian child at home in Monrovia, talking the way local children speak English. Strong West African sing-song rhythm, flat even stress, soft endings, no American accent at all. Shy, happy and clear. Not too fast. Say:"
-  };
   var PITCH = 1.25;
   var current = "1";
   try {
@@ -148,15 +144,33 @@ function voiceFn() {
   } catch (e) {}
   var player = null, token = 0, lastUrl = null;
 
+  function pickChildVoice() {
+    try {
+      var list = window.speechSynthesis.getVoices() || [];
+      var en = list.filter(function (v) { return /^en/i.test(v.lang || ""); });
+      var female = en.filter(function (v) {
+        return /female|woman|girl|samantha|zira|karen|susan|serena|moira|tessa|fiona|victoria|google us english|google uk english female/i.test(v.name || "");
+      });
+      return female[0] || en[0] || null;
+    } catch (e) { return null; }
+  }
+
   function browserSpeak(t) {
     try {
       if (!window.speechSynthesis) return;
       window.speechSynthesis.cancel();
       var u = new SpeechSynthesisUtterance(t);
-      u.lang = "en-US";
+      var v = pickChildVoice();
+      if (v) { u.voice = v; u.lang = v.lang; } else { u.lang = "en-US"; }
+      u.pitch = 2;
+      u.rate = 0.9;
       window.speechSynthesis.speak(u);
     } catch (e) {}
   }
+
+  try {
+    if (window.speechSynthesis) window.speechSynthesis.getVoices();
+  } catch (e) {}
 
   function makeBlob(res) {
     var bin = atob(res.data);
@@ -195,7 +209,7 @@ function voiceFn() {
         } catch (e) { browserSpeak(clean); }
       })
       .withFailureHandler(function () { if (my === token) browserSpeak(clean); })
-      .speakSarah(clean, "Zephyr", STYLES[current]);
+      .speakSarah(clean, "Zephyr", "");
   };
 
   var sel = document.createElement("select");
