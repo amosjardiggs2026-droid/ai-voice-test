@@ -77,6 +77,7 @@ function micFn() {
   }
 
   async function start() {
+    try { if (window.stopSpeaking) window.stopSpeaking(); } catch (x) {}
     try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (x) {}
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
@@ -134,6 +135,94 @@ function micFn() {
   };
 }
 
+function voiceFn() {
+  var STYLES = {
+    "1": "Speak as a small, sweet Liberian girl about 6 years old. Use a natural Liberian English accent, like a child from Monrovia. Relaxed, melodic rhythm, rounded vowels, not American and not British. Warm and simple. Not too fast. Say:",
+    "2": "Speak as a small Liberian child at home in Monrovia, talking the way local children speak English. Strong West African sing-song rhythm, flat even stress, soft endings, no American accent at all. Shy, happy and clear. Not too fast. Say:"
+  };
+  var PITCH = 1.25;
+  var current = "1";
+  try {
+    var saved = localStorage.getItem("sarahVoice");
+    if (saved === "1" || saved === "2") current = saved;
+  } catch (e) {}
+  var player = null, token = 0, lastUrl = null;
+
+  function browserSpeak(t) {
+    try {
+      if (!window.speechSynthesis) return;
+      window.speechSynthesis.cancel();
+      var u = new SpeechSynthesisUtterance(t);
+      u.lang = "en-US";
+      window.speechSynthesis.speak(u);
+    } catch (e) {}
+  }
+
+  function makeBlob(res) {
+    var bin = atob(res.data);
+    var n = bin.length;
+    var b = new Uint8Array(n);
+    for (var i = 0; i < n; i++) b[i] = bin.charCodeAt(i);
+    if (n > 44 && b[0] === 82 && b[1] === 73 && b[2] === 70 && b[3] === 70) {
+      var dv = new DataView(b.buffer);
+      dv.setUint32(24, Math.round(dv.getUint32(24, true) * PITCH), true);
+      dv.setUint32(28, Math.round(dv.getUint32(28, true) * PITCH), true);
+      return new Blob([b], { type: "audio/wav" });
+    }
+    return new Blob([b], { type: res.mime || "audio/wav" });
+  }
+
+  window.stopSpeaking = function () {
+    token++;
+    try { if (player) { player.pause(); player = null; } } catch (e) {}
+    try { if (lastUrl) { URL.revokeObjectURL(lastUrl); lastUrl = null; } } catch (e) {}
+    try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (e) {}
+  };
+
+  window.speak = function (text) {
+    window.stopSpeaking();
+    var my = token;
+    var clean = String(text).replace(/\*\*/g, "");
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (my !== token) return;
+        if (!res || !res.ok || !res.data) { browserSpeak(clean); return; }
+        try {
+          lastUrl = URL.createObjectURL(makeBlob(res));
+          var a = new Audio(lastUrl);
+          player = a;
+          a.play().catch(function () { browserSpeak(clean); });
+        } catch (e) { browserSpeak(clean); }
+      })
+      .withFailureHandler(function () { if (my === token) browserSpeak(clean); })
+      .speakSarah(clean, "Zephyr", STYLES[current]);
+  };
+
+  var sel = document.createElement("select");
+  sel.title = "Sarah's voice";
+  sel.style.cssText = "background:#161d2b;color:#f5a54a;border:1px solid #2c3d63;border-radius:6px;padding:4px;font-size:13px;margin-left:8px";
+  var o1 = document.createElement("option"); o1.value = "1"; o1.textContent = "Sarah 1";
+  var o2 = document.createElement("option"); o2.value = "2"; o2.textContent = "Sarah 2";
+  sel.appendChild(o1);
+  sel.appendChild(o2);
+  sel.value = current;
+  sel.onchange = function () {
+    current = sel.value;
+    try { localStorage.setItem("sarahVoice", current); } catch (e) {}
+  };
+  var auto = document.getElementById("autoSpeak");
+  var host = auto && auto.parentElement;
+  if (host && host.parentElement) {
+    host.parentElement.insertBefore(sel, host.nextSibling);
+  } else {
+    sel.style.position = "fixed";
+    sel.style.right = "8px";
+    sel.style.bottom = "8px";
+    sel.style.zIndex = "9999";
+    document.body.appendChild(sel);
+  }
+}
+
 var extraCss = "<style>.bar textarea{flex:1;background:transparent;border:0;outline:0;color:var(--text);font-size:16px;font-family:inherit;line-height:1.4;padding:10px 6px;min-width:0;resize:none;max-height:220px;overflow-y:auto}.bar textarea::placeholder{color:var(--muted)}</style>";
 
 var growJs = "<script>(function(){var t=document.getElementById('question');if(!t||t.tagName!=='TEXTAREA')return;var last='';function g(){t.style.height='auto';t.style.height=Math.min(t.scrollHeight,220)+'px';}t.addEventListener('input',function(){last=t.value;g();});setInterval(function(){if(t.value!==last){last=t.value;g();}},250);g();})();<\/script>";
@@ -149,7 +238,8 @@ fetch(API, { method: "POST", body: JSON.stringify({ fn: "__page" }) })
       'input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendQuestion(); } });');
     var html = "<script>(" + shimFn.toString() + ")(" + JSON.stringify(API) + ");<\/script>" +
       page + extraCss + growJs +
-      "<script>window.addEventListener('load'," + micFn.toString() + ");<\/script>";
+      "<script>window.addEventListener('load'," + micFn.toString() + ");<\/script>" +
+      "<script>window.addEventListener('load'," + voiceFn.toString() + ");<\/script>";
     document.open();
     document.write(html);
     document.close();
