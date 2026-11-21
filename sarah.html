@@ -142,35 +142,18 @@ function voiceFn() {
     var saved = localStorage.getItem("sarahVoice");
     if (saved === "1" || saved === "2") current = saved;
   } catch (e) {}
-  var player = null, token = 0, lastUrl = null;
+  var player = null, token = 0, lastUrl = null, noteTimer = null;
 
-  function pickChildVoice() {
-    try {
-      var list = window.speechSynthesis.getVoices() || [];
-      var en = list.filter(function (v) { return /^en/i.test(v.lang || ""); });
-      var female = en.filter(function (v) {
-        return /female|woman|girl|samantha|zira|karen|susan|serena|moira|tessa|fiona|victoria|google us english|google uk english female/i.test(v.name || "");
-      });
-      return female[0] || en[0] || null;
-    } catch (e) { return null; }
+  var rest = document.createElement("div");
+  rest.style.cssText = "position:fixed;left:0;right:0;bottom:90px;text-align:center;font:13px sans-serif;color:#f5a54a;pointer-events:none;z-index:9999;display:none";
+  rest.textContent = "Sarah's voice is resting. Tap Read aloud again in a minute.";
+  document.body.appendChild(rest);
+
+  function silentNote() {
+    rest.style.display = "block";
+    clearTimeout(noteTimer);
+    noteTimer = setTimeout(function () { rest.style.display = "none"; }, 6000);
   }
-
-  function browserSpeak(t) {
-    try {
-      if (!window.speechSynthesis) return;
-      window.speechSynthesis.cancel();
-      var u = new SpeechSynthesisUtterance(t);
-      var v = pickChildVoice();
-      if (v) { u.voice = v; u.lang = v.lang; } else { u.lang = "en-US"; }
-      u.pitch = 2;
-      u.rate = 0.9;
-      window.speechSynthesis.speak(u);
-    } catch (e) {}
-  }
-
-  try {
-    if (window.speechSynthesis) window.speechSynthesis.getVoices();
-  } catch (e) {}
 
   function makeBlob(res) {
     var bin = atob(res.data);
@@ -191,6 +174,7 @@ function voiceFn() {
     try { if (player) { player.pause(); player = null; } } catch (e) {}
     try { if (lastUrl) { URL.revokeObjectURL(lastUrl); lastUrl = null; } } catch (e) {}
     try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (e) {}
+    rest.style.display = "none";
   };
 
   window.speak = function (text) {
@@ -200,15 +184,15 @@ function voiceFn() {
     google.script.run
       .withSuccessHandler(function (res) {
         if (my !== token) return;
-        if (!res || !res.ok || !res.data) { browserSpeak(clean); return; }
+        if (!res || !res.ok || !res.data) { silentNote(); return; }
         try {
           lastUrl = URL.createObjectURL(makeBlob(res));
           var a = new Audio(lastUrl);
           player = a;
-          a.play().catch(function () { browserSpeak(clean); });
-        } catch (e) { browserSpeak(clean); }
+          a.play().catch(function () { silentNote(); });
+        } catch (e) { silentNote(); }
       })
-      .withFailureHandler(function () { if (my === token) browserSpeak(clean); })
+      .withFailureHandler(function () { if (my === token) silentNote(); })
       .speakSarah(clean, "Zephyr", "");
   };
 
