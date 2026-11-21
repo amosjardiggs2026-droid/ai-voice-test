@@ -12,6 +12,49 @@
 var API = "https://script.google.com/macros/s/AKfycbwdVMu1S09SCiLfGuRbagysR5Nc167Yf4mIqqfXIalhekXw4ZNYG3Oo1u_E6att__4D/exec";
 
 function shimFn(API) {
+  function cleanMath(s) {
+    if (typeof s !== "string") return s;
+    var SUP = {"0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹","+":"⁺","-":"⁻","=":"⁼","(":"⁽",")":"⁾","n":"ⁿ","i":"ⁱ"};
+    var SUB = {"0":"₀","1":"₁","2":"₂","3":"₃","4":"₄","5":"₅","6":"₆","7":"₇","8":"₈","9":"₉","+":"₊","-":"₋","=":"₌","(":"₍",")":"₎"};
+    var SYM = {pi:"π",theta:"θ",alpha:"α",beta:"β",gamma:"γ",delta:"δ",Delta:"Δ",lambda:"λ",mu:"μ",omega:"ω",Omega:"Ω",sigma:"σ",rho:"ρ",phi:"φ",epsilon:"ε",
+      times:"×",cdot:"·",div:"÷",pm:"±",mp:"∓",leq:"≤",le:"≤",geq:"≥",ge:"≥",neq:"≠",ne:"≠",approx:"≈",equiv:"≡",
+      rightarrow:"→",to:"→",leftarrow:"←",Rightarrow:"⇒",leftrightarrow:"↔",rightleftharpoons:"⇌",
+      infty:"∞",sqrt:"√",circ:"°",degree:"°",sum:"Σ",int:"∫",propto:"∝",therefore:"∴",
+      left:"",right:"",quad:" ",qquad:"  ",displaystyle:"",ldots:"...",dots:"..."};
+    function conv(str, M) {
+      var o = "";
+      for (var i = 0; i < str.length; i++) {
+        var c = str.charAt(i);
+        if (!M[c]) return null;
+        o += M[c];
+      }
+      return o;
+    }
+    s = s.replace(/\$\$?([^$]+?)\$\$?/g, function (m, inner) {
+      return (/[\\^_{}]/.test(inner) || /^[A-Za-z]{1,2}$/.test(inner.trim())) ? inner : m;
+    });
+    s = s.replace(/\\\[|\\\]|\\\(|\\\)/g, "");
+    for (var k = 0; k < 3; k++) {
+      s = s.replace(/\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, "($1)/($2)");
+    }
+    s = s.replace(/\\sqrt\s*\{([^{}]*)\}/g, "√($1)");
+    s = s.replace(/\\(?:text|mathrm|mathbf|textbf|operatorname)\s*\{([^{}]*)\}/g, "$1");
+    s = s.replace(/\\[,;!: ]/g, " ").replace(/\\%/g, "%");
+    s = s.replace(/\\([A-Za-z]+)/g, function (m, n) {
+      return SYM.hasOwnProperty(n) ? SYM[n] : n;
+    });
+    s = s.replace(/\^\{([^{}]*)\}/g, function (m, x) {
+      var r = conv(x, SUP);
+      return r === null ? "^(" + x + ")" : r;
+    });
+    s = s.replace(/\^([0-9n])/g, function (m, x) { return SUP[x]; });
+    s = s.replace(/_\{([^{}]*)\}/g, function (m, x) {
+      var r = conv(x, SUB);
+      return r === null ? "_(" + x + ")" : r;
+    });
+    s = s.replace(/([A-Za-z\)\]])_([0-9])/g, function (m, a, x) { return a + SUB[x]; });
+    return s;
+  }
   function make(ok, fail) {
     return new Proxy({}, {
       get: function (t, name) {
@@ -24,7 +67,600 @@ function shimFn(API) {
             .then(function (r) { return r.json(); })
             .then(function (d) {
               if (d && d.error) { if (fail) fail(new Error(d.error)); }
-              else if (ok) ok(d);
+              else if (ok) {
+                try { if (d && typeof d.answer === "string") d.answer = cleanMath(d.answer); } catch (e) {}
+                ok(d);
+              }
+            })
+            .catch(function (e) { if (fail) fail(e); });
+        };
+      }
+    });
+  }
+  window.google = { script: { run: make(null, null), host: { close: function () {}, setHeight: function () {} } } };
+}
+
+function micFn() {
+  var AC = window.AudioContext || window.webkitAudioContext;
+  var inp = document.querySelector("textarea") || document.querySelector('input[type="text"], input:not([type])');
+  if (!inp || !AC || !navigator.mediaDevices) return;
+  var bar = inp.parentElement;
+  var btns = bar.querySelectorAll("button");
+  var send = btns.length ? btns[btns.length - 1] : null;
+  var mic = document.createElement("button");
+  mic.type = "button";
+  mic.textContent = "🎤";
+  mic.title = "Speak";
+  mic.style.cssText = "flex:none;width:38px;height:38px;border:0;border-radius:50%;background:#2c3d63;color:#fff;font-size:18px;margin:0 6px;cursor:pointer";
+  if (send && send.parentElement === bar) bar.insertBefore(mic, send); else bar.appendChild(mic);
+  var note = document.createElement("div");
+  note.style.cssText = "position:fixed;left:0;right:0;top:4px;text-align:center;font:12px sans-serif;color:#9fb0d0;pointer-events:none;z-index:9999";
+  document.body.appendChild(note);
+
+  var stream = null, ctx = null, proc = null, src = null, chunks = [], rate = 48000;
+  var recording = false, busy = false, base = "", timer = null;
+
+  function put(v) { inp.value = v; inp.dispatchEvent(new Event("input", { bubbles: true })); }
+  function reset() { mic.textContent = "🎤"; mic.style.background = "#2c3d63"; busy = false; }
+
+  function toWav(samples, inRate) {
+    var outRate = 16000, ratio = inRate / outRate;
+    var n = Math.floor(samples.length / ratio);
+    var buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+    function s(o, str) { for (var k = 0; k < str.length; k++) v.setUint8(o + k, str.charCodeAt(k)); }
+    s(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); s(8, "WAVE"); s(12, "fmt ");
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, outRate, true); v.setUint32(28, outRate * 2, true);
+    v.setUint16(32, 2, true); v.setUint16(34, 16, true); s(36, "data"); v.setUint32(40, n * 2, true);
+    for (var i = 0; i < n; i++) {
+      var a = Math.floor(i * ratio), b = Math.min(samples.length, Math.floor((i + 1) * ratio)), sum = 0, c = 0;
+      for (var j = a; j < b; j++) { sum += samples[j]; c++; }
+      var x = c ? sum / c : 0;
+      x = Math.max(-1, Math.min(1, x));
+      v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7FFF, true);
+    }
+    return new Blob([buf], { type: "audio/wav" });
+  }
+
+  async function start() {
+    try { if (window.stopSpeaking) window.stopSpeaking(); } catch (x) {}
+    try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (x) {}
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    } catch (e) { note.textContent = "The microphone is blocked. Please allow the microphone."; return; }
+    ctx = new AC();
+    if (ctx.state === "suspended") { try { await ctx.resume(); } catch (x) {} }
+    rate = ctx.sampleRate;
+    src = ctx.createMediaStreamSource(stream);
+    proc = ctx.createScriptProcessor(4096, 1, 1);
+    chunks = [];
+    proc.onaudioprocess = function (e) { chunks.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
+    src.connect(proc);
+    proc.connect(ctx.destination);
+    base = inp.value.trim();
+    recording = true;
+    mic.textContent = "⏹";
+    mic.style.background = "#e5484d";
+    note.textContent = "Recording... speak clearly, then tap the square when you finish";
+    timer = setTimeout(function () { if (recording) stop(); }, 60000);
+  }
+
+  function stop() {
+    recording = false;
+    clearTimeout(timer);
+    try { proc.disconnect(); src.disconnect(); } catch (x) {}
+    try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (x) {}
+    try { ctx.close(); } catch (x) {}
+    busy = true;
+    mic.textContent = "…";
+    note.textContent = "Understanding what you said...";
+    var total = 0, i;
+    for (i = 0; i < chunks.length; i++) total += chunks[i].length;
+    if (total < rate * 0.4) { reset(); note.textContent = "That was too short. Please try again."; return; }
+    var all = new Float32Array(total), pos = 0;
+    for (i = 0; i < chunks.length; i++) { all.set(chunks[i], pos); pos += chunks[i].length; }
+    var fr = new FileReader();
+    fr.onload = function () {
+      var b64 = String(fr.result).split(",")[1];
+      google.script.run
+        .withSuccessHandler(function (res) {
+          reset();
+          var t = res && res.text ? String(res.text).trim() : "";
+          if (t) { put((base ? base + " " : "") + t); note.textContent = "Tap the send arrow when ready."; }
+          else { note.textContent = "I could not hear you clearly. Please try again, a little closer to the microphone."; }
+        })
+        .withFailureHandler(function () { reset(); note.textContent = "Could not understand the audio. Please try again."; })
+        .transcribeAudio(b64, "audio/wav");
+    };
+    fr.readAsDataURL(toWav(all, rate));
+  }
+
+  mic.onclick = function () {
+    if (busy) return;
+    if (recording) stop(); else start();
+  };
+}
+
+function voiceFn() {
+  var PITCH = 1.25;
+  var current = "1";
+  try {
+    var saved = localStorage.getItem("sarahVoice");
+    if (saved === "1" || saved === "2") current = saved;
+  } catch (e) {}
+  var player = null, token = 0, lastUrl = null, noteTimer = null;
+
+  var rest = document.createElement("div");
+  rest.style.cssText = "position:fixed;left:0;right:0;bottom:90px;text-align:center;font:13px sans-serif;color:#f5a54a;pointer-events:none;z-index:9999;display:none";
+  rest.textContent = "Sarah's voice is resting. Tap Read aloud again in a minute.";
+  document.body.appendChild(rest);
+
+  function silentNote() {
+    rest.style.display = "block";
+    clearTimeout(noteTimer);
+    noteTimer = setTimeout(function () { rest.style.display = "none"; }, 6000);
+  }
+
+  function makeBlob(res) {
+    var bin = atob(res.data);
+    var n = bin.length;
+    var b = new Uint8Array(n);
+    for (var i = 0; i < n; i++) b[i] = bin.charCodeAt(i);
+    if (n > 44 && b[0] === 82 && b[1] === 73 && b[2] === 70 && b[3] === 70) {
+      var dv = new DataView(b.buffer);
+      dv.setUint32(24, Math.round(dv.getUint32(24, true) * PITCH), true);
+      dv.setUint32(28, Math.round(dv.getUint32(28, true) * PITCH), true);
+      return new Blob([b], { type: "audio/wav" });
+    }
+    return new Blob([b], { type: res.mime || "audio/wav" });
+  }
+
+  window.stopSpeaking = function () {
+    token++;
+    try { if (player) { player.pause(); player = null; } } catch (e) {}
+    try { if (lastUrl) { URL.revokeObjectURL(lastUrl); lastUrl = null; } } catch (e) {}
+    try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (e) {}
+    rest.style.display = "none";
+  };
+
+  window.speak = function (text) {
+    window.stopSpeaking();
+    var my = token;
+    var clean = String(text).replace(/\*\*/g, "");
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (my !== token) return;
+        if (!res || !res.ok || !res.data) { silentNote(); return; }
+        try {
+          lastUrl = URL.createObjectURL(makeBlob(res));
+          var a = new Audio(lastUrl);
+          player = a;
+          a.play().catch(function () { silentNote(); });
+        } catch (e) { silentNote(); }
+      })
+      .withFailureHandler(function () { if (my === token) silentNote(); })
+      .speakSarah(clean, "Zephyr", "");
+  };
+
+  var sel = document.createElement("select");
+  sel.title = "Sarah's voice";
+  sel.style.cssText = "background:#161d2b;color:#f5a54a;border:1px solid #2c3d63;border-radius:6px;padding:4px;font-size:13px;margin-left:8px";
+  var o1 = document.createElement("option"); o1.value = "1"; o1.textContent = "Sarah 1";
+  var o2 = document.createElement("option"); o2.value = "2"; o2.textContent = "Sarah 2";
+  sel.appendChild(o1);
+  sel.appendChild(o2);
+  sel.value = current;
+  sel.onchange = function () {
+    current = sel.value;
+    try { localStorage.setItem("sarahVoice", current); } catch (e) {}
+  };
+  var auto = document.getElementById("autoSpeak");
+  var host = auto && auto.parentElement;
+  if (host && host.parentElement) {
+    host.parentElement.insertBefore(sel, host.nextSibling);
+  } else {
+    sel.style.position = "fixed";
+    sel.style.right = "8px";
+    sel.style.bottom = "8px";
+    sel.style.zIndex = "9999";
+    document.body.appendChild(sel);
+  }
+}
+
+var extraCss = "<style>.bar textarea{flex:1;background:transparent;border:0;outline:0;color:var(--text);font-size:16px;font-family:inherit;line-height:1.4;padding:10px 6px;min-width:0;resize:none;max-height:220px;overflow-y:auto}.bar textarea::placeholder{color:var(--muted)}</style>";
+
+var growJs = "<script>(function(){var t=document.getElementById('question');if(!t||t.tagName!=='TEXTAREA')return;var last='';function g(){t.style.height='auto';t.style.height=Math.min(t.scrollHeight,220)+'px';}t.addEventListener('input',function(){last=t.value;g();});setInterval(function(){if(t.value!==last){last=t.value;g();}},250);g();})();<\/script>";
+
+fetch(API, { method: "POST", body: JSON.stringify({ fn: "__page" }) })
+  .then(function (r) { return r.json(); })
+  .then(function (d) {
+    if (!d.html) throw new Error("no page");
+    var page = d.html;
+    page = page.replace(/<input\s+type="text"\s+id="question"[^>]*>/i,
+      '<textarea id="question" rows="1" placeholder="Ask Sarah anything" maxlength="5000"></textarea>');
+    page = page.replace(/input\.addEventListener\(\s*["']keydown["']\s*,\s*function\s*\(\s*e\s*\)\s*\{\s*if\s*\(\s*e\.key\s*===\s*["']Enter["']\s*\)\s*sendQuestion\(\)\s*;?\s*\}\s*\)\s*;?/,
+      'input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendQuestion(); } });');
+    var html = "<script>(" + shimFn.toString() + ")(" + JSON.stringify(API) + ");<\/script>" +
+      page + extraCss + growJs +
+      "<script>window.addEventListener('load'," + micFn.toString() + ");<\/script>" +
+      "<script>window.addEventListener('load'," + voiceFn.toString() + ");<\/script>";
+    document.open();
+    document.write(html);
+    document.close();
+  })
+  .catch(function () {
+    document.getElementById("msg").textContent = "Cannot load Sarah. Check that the deployment access is set to Anyone.";
+  });
+</script>
+</body>
+</html><!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sarah AI</title>
+<style>body{margin:0;background:#0f1b33;color:#fff;font-family:sans-serif;padding:24px}</style>
+</head>
+<body>
+<p id="msg">Loading Sarah...</p>
+<script>
+var API = "https://script.google.com/macros/s/AKfycbwdVMu1S09SCiLfGuRbagysR5Nc167Yf4mIqqfXIalhekXw4ZNYG3Oo1u_E6att__4D/exec";
+
+function shimFn(API) {
+  function cleanMath(s) {
+    if (typeof s !== "string") return s;
+    var SUP = {"0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹","+":"⁺","-":"⁻","=":"⁼","(":"⁽",")":"⁾","n":"ⁿ","i":"ⁱ"};
+    var SUB = {"0":"₀","1":"₁","2":"₂","3":"₃","4":"₄","5":"₅","6":"₆","7":"₇","8":"₈","9":"₉","+":"₊","-":"₋","=":"₌","(":"₍",")":"₎"};
+    var SYM = {pi:"π",theta:"θ",alpha:"α",beta:"β",gamma:"γ",delta:"δ",Delta:"Δ",lambda:"λ",mu:"μ",omega:"ω",Omega:"Ω",sigma:"σ",rho:"ρ",phi:"φ",epsilon:"ε",
+      times:"×",cdot:"·",div:"÷",pm:"±",mp:"∓",leq:"≤",le:"≤",geq:"≥",ge:"≥",neq:"≠",ne:"≠",approx:"≈",equiv:"≡",
+      rightarrow:"→",to:"→",leftarrow:"←",Rightarrow:"⇒",leftrightarrow:"↔",rightleftharpoons:"⇌",
+      infty:"∞",sqrt:"√",circ:"°",degree:"°",sum:"Σ",int:"∫",propto:"∝",therefore:"∴",
+      left:"",right:"",quad:" ",qquad:"  ",displaystyle:"",ldots:"...",dots:"..."};
+    function conv(str, M) {
+      var o = "";
+      for (var i = 0; i < str.length; i++) {
+        var c = str.charAt(i);
+        if (!M[c]) return null;
+        o += M[c];
+      }
+      return o;
+    }
+    s = s.replace(/\$\$?([^$]+?)\$\$?/g, function (m, inner) {
+      return (/[\\^_{}]/.test(inner) || /^[A-Za-z]{1,2}$/.test(inner.trim())) ? inner : m;
+    });
+    s = s.replace(/\\\[|\\\]|\\\(|\\\)/g, "");
+    for (var k = 0; k < 3; k++) {
+      s = s.replace(/\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, "($1)/($2)");
+    }
+    s = s.replace(/\\sqrt\s*\{([^{}]*)\}/g, "√($1)");
+    s = s.replace(/\\(?:text|mathrm|mathbf|textbf|operatorname)\s*\{([^{}]*)\}/g, "$1");
+    s = s.replace(/\\[,;!: ]/g, " ").replace(/\\%/g, "%");
+    s = s.replace(/\\([A-Za-z]+)/g, function (m, n) {
+      return SYM.hasOwnProperty(n) ? SYM[n] : n;
+    });
+    s = s.replace(/\^\{([^{}]*)\}/g, function (m, x) {
+      var r = conv(x, SUP);
+      return r === null ? "^(" + x + ")" : r;
+    });
+    s = s.replace(/\^([0-9n])/g, function (m, x) { return SUP[x]; });
+    s = s.replace(/_\{([^{}]*)\}/g, function (m, x) {
+      var r = conv(x, SUB);
+      return r === null ? "_(" + x + ")" : r;
+    });
+    s = s.replace(/([A-Za-z\)\]])_([0-9])/g, function (m, a, x) { return a + SUB[x]; });
+    return s;
+  }
+  function make(ok, fail) {
+    return new Proxy({}, {
+      get: function (t, name) {
+        if (name === "withSuccessHandler") return function (f) { return make(f, fail); };
+        if (name === "withFailureHandler") return function (f) { return make(ok, f); };
+        if (name === "withUserObject") return function () { return make(ok, fail); };
+        return function () {
+          var args = Array.prototype.slice.call(arguments);
+          fetch(API, { method: "POST", body: JSON.stringify({ fn: name, args: args }) })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+              if (d && d.error) { if (fail) fail(new Error(d.error)); }
+              else if (ok) {
+                try { if (d && typeof d.answer === "string") d.answer = cleanMath(d.answer); } catch (e) {}
+                ok(d);
+              }
+            })
+            .catch(function (e) { if (fail) fail(e); });
+        };
+      }
+    });
+  }
+  window.google = { script: { run: make(null, null), host: { close: function () {}, setHeight: function () {} } } };
+}
+
+function micFn() {
+  var AC = window.AudioContext || window.webkitAudioContext;
+  var inp = document.querySelector("textarea") || document.querySelector('input[type="text"], input:not([type])');
+  if (!inp || !AC || !navigator.mediaDevices) return;
+  var bar = inp.parentElement;
+  var btns = bar.querySelectorAll("button");
+  var send = btns.length ? btns[btns.length - 1] : null;
+  var mic = document.createElement("button");
+  mic.type = "button";
+  mic.textContent = "🎤";
+  mic.title = "Speak";
+  mic.style.cssText = "flex:none;width:38px;height:38px;border:0;border-radius:50%;background:#2c3d63;color:#fff;font-size:18px;margin:0 6px;cursor:pointer";
+  if (send && send.parentElement === bar) bar.insertBefore(mic, send); else bar.appendChild(mic);
+  var note = document.createElement("div");
+  note.style.cssText = "position:fixed;left:0;right:0;top:4px;text-align:center;font:12px sans-serif;color:#9fb0d0;pointer-events:none;z-index:9999";
+  document.body.appendChild(note);
+
+  var stream = null, ctx = null, proc = null, src = null, chunks = [], rate = 48000;
+  var recording = false, busy = false, base = "", timer = null;
+
+  function put(v) { inp.value = v; inp.dispatchEvent(new Event("input", { bubbles: true })); }
+  function reset() { mic.textContent = "🎤"; mic.style.background = "#2c3d63"; busy = false; }
+
+  function toWav(samples, inRate) {
+    var outRate = 16000, ratio = inRate / outRate;
+    var n = Math.floor(samples.length / ratio);
+    var buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+    function s(o, str) { for (var k = 0; k < str.length; k++) v.setUint8(o + k, str.charCodeAt(k)); }
+    s(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); s(8, "WAVE"); s(12, "fmt ");
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, outRate, true); v.setUint32(28, outRate * 2, true);
+    v.setUint16(32, 2, true); v.setUint16(34, 16, true); s(36, "data"); v.setUint32(40, n * 2, true);
+    for (var i = 0; i < n; i++) {
+      var a = Math.floor(i * ratio), b = Math.min(samples.length, Math.floor((i + 1) * ratio)), sum = 0, c = 0;
+      for (var j = a; j < b; j++) { sum += samples[j]; c++; }
+      var x = c ? sum / c : 0;
+      x = Math.max(-1, Math.min(1, x));
+      v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7FFF, true);
+    }
+    return new Blob([buf], { type: "audio/wav" });
+  }
+
+  async function start() {
+    try { if (window.stopSpeaking) window.stopSpeaking(); } catch (x) {}
+    try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (x) {}
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    } catch (e) { note.textContent = "The microphone is blocked. Please allow the microphone."; return; }
+    ctx = new AC();
+    if (ctx.state === "suspended") { try { await ctx.resume(); } catch (x) {} }
+    rate = ctx.sampleRate;
+    src = ctx.createMediaStreamSource(stream);
+    proc = ctx.createScriptProcessor(4096, 1, 1);
+    chunks = [];
+    proc.onaudioprocess = function (e) { chunks.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
+    src.connect(proc);
+    proc.connect(ctx.destination);
+    base = inp.value.trim();
+    recording = true;
+    mic.textContent = "⏹";
+    mic.style.background = "#e5484d";
+    note.textContent = "Recording... speak clearly, then tap the square when you finish";
+    timer = setTimeout(function () { if (recording) stop(); }, 60000);
+  }
+
+  function stop() {
+    recording = false;
+    clearTimeout(timer);
+    try { proc.disconnect(); src.disconnect(); } catch (x) {}
+    try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (x) {}
+    try { ctx.close(); } catch (x) {}
+    busy = true;
+    mic.textContent = "…";
+    note.textContent = "Understanding what you said...";
+    var total = 0, i;
+    for (i = 0; i < chunks.length; i++) total += chunks[i].length;
+    if (total < rate * 0.4) { reset(); note.textContent = "That was too short. Please try again."; return; }
+    var all = new Float32Array(total), pos = 0;
+    for (i = 0; i < chunks.length; i++) { all.set(chunks[i], pos); pos += chunks[i].length; }
+    var fr = new FileReader();
+    fr.onload = function () {
+      var b64 = String(fr.result).split(",")[1];
+      google.script.run
+        .withSuccessHandler(function (res) {
+          reset();
+          var t = res && res.text ? String(res.text).trim() : "";
+          if (t) { put((base ? base + " " : "") + t); note.textContent = "Tap the send arrow when ready."; }
+          else { note.textContent = "I could not hear you clearly. Please try again, a little closer to the microphone."; }
+        })
+        .withFailureHandler(function () { reset(); note.textContent = "Could not understand the audio. Please try again."; })
+        .transcribeAudio(b64, "audio/wav");
+    };
+    fr.readAsDataURL(toWav(all, rate));
+  }
+
+  mic.onclick = function () {
+    if (busy) return;
+    if (recording) stop(); else start();
+  };
+}
+
+function voiceFn() {
+  var PITCH = 1.25;
+  var current = "1";
+  try {
+    var saved = localStorage.getItem("sarahVoice");
+    if (saved === "1" || saved === "2") current = saved;
+  } catch (e) {}
+  var player = null, token = 0, lastUrl = null, noteTimer = null;
+
+  var rest = document.createElement("div");
+  rest.style.cssText = "position:fixed;left:0;right:0;bottom:90px;text-align:center;font:13px sans-serif;color:#f5a54a;pointer-events:none;z-index:9999;display:none";
+  rest.textContent = "Sarah's voice is resting. Tap Read aloud again in a minute.";
+  document.body.appendChild(rest);
+
+  function silentNote() {
+    rest.style.display = "block";
+    clearTimeout(noteTimer);
+    noteTimer = setTimeout(function () { rest.style.display = "none"; }, 6000);
+  }
+
+  function makeBlob(res) {
+    var bin = atob(res.data);
+    var n = bin.length;
+    var b = new Uint8Array(n);
+    for (var i = 0; i < n; i++) b[i] = bin.charCodeAt(i);
+    if (n > 44 && b[0] === 82 && b[1] === 73 && b[2] === 70 && b[3] === 70) {
+      var dv = new DataView(b.buffer);
+      dv.setUint32(24, Math.round(dv.getUint32(24, true) * PITCH), true);
+      dv.setUint32(28, Math.round(dv.getUint32(28, true) * PITCH), true);
+      return new Blob([b], { type: "audio/wav" });
+    }
+    return new Blob([b], { type: res.mime || "audio/wav" });
+  }
+
+  window.stopSpeaking = function () {
+    token++;
+    try { if (player) { player.pause(); player = null; } } catch (e) {}
+    try { if (lastUrl) { URL.revokeObjectURL(lastUrl); lastUrl = null; } } catch (e) {}
+    try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (e) {}
+    rest.style.display = "none";
+  };
+
+  window.speak = function (text) {
+    window.stopSpeaking();
+    var my = token;
+    var clean = String(text).replace(/\*\*/g, "");
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (my !== token) return;
+        if (!res || !res.ok || !res.data) { silentNote(); return; }
+        try {
+          lastUrl = URL.createObjectURL(makeBlob(res));
+          var a = new Audio(lastUrl);
+          player = a;
+          a.play().catch(function () { silentNote(); });
+        } catch (e) { silentNote(); }
+      })
+      .withFailureHandler(function () { if (my === token) silentNote(); })
+      .speakSarah(clean, "Zephyr", "");
+  };
+
+  var sel = document.createElement("select");
+  sel.title = "Sarah's voice";
+  sel.style.cssText = "background:#161d2b;color:#f5a54a;border:1px solid #2c3d63;border-radius:6px;padding:4px;font-size:13px;margin-left:8px";
+  var o1 = document.createElement("option"); o1.value = "1"; o1.textContent = "Sarah 1";
+  var o2 = document.createElement("option"); o2.value = "2"; o2.textContent = "Sarah 2";
+  sel.appendChild(o1);
+  sel.appendChild(o2);
+  sel.value = current;
+  sel.onchange = function () {
+    current = sel.value;
+    try { localStorage.setItem("sarahVoice", current); } catch (e) {}
+  };
+  var auto = document.getElementById("autoSpeak");
+  var host = auto && auto.parentElement;
+  if (host && host.parentElement) {
+    host.parentElement.insertBefore(sel, host.nextSibling);
+  } else {
+    sel.style.position = "fixed";
+    sel.style.right = "8px";
+    sel.style.bottom = "8px";
+    sel.style.zIndex = "9999";
+    document.body.appendChild(sel);
+  }
+}
+
+var extraCss = "<style>.bar textarea{flex:1;background:transparent;border:0;outline:0;color:var(--text);font-size:16px;font-family:inherit;line-height:1.4;padding:10px 6px;min-width:0;resize:none;max-height:220px;overflow-y:auto}.bar textarea::placeholder{color:var(--muted)}</style>";
+
+var growJs = "<script>(function(){var t=document.getElementById('question');if(!t||t.tagName!=='TEXTAREA')return;var last='';function g(){t.style.height='auto';t.style.height=Math.min(t.scrollHeight,220)+'px';}t.addEventListener('input',function(){last=t.value;g();});setInterval(function(){if(t.value!==last){last=t.value;g();}},250);g();})();<\/script>";
+
+fetch(API, { method: "POST", body: JSON.stringify({ fn: "__page" }) })
+  .then(function (r) { return r.json(); })
+  .then(function (d) {
+    if (!d.html) throw new Error("no page");
+    var page = d.html;
+    page = page.replace(/<input\s+type="text"\s+id="question"[^>]*>/i,
+      '<textarea id="question" rows="1" placeholder="Ask Sarah anything" maxlength="5000"></textarea>');
+    page = page.replace(/input\.addEventListener\(\s*["']keydown["']\s*,\s*function\s*\(\s*e\s*\)\s*\{\s*if\s*\(\s*e\.key\s*===\s*["']Enter["']\s*\)\s*sendQuestion\(\)\s*;?\s*\}\s*\)\s*;?/,
+      'input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendQuestion(); } });');
+    var html = "<script>(" + shimFn.toString() + ")(" + JSON.stringify(API) + ");<\/script>" +
+      page + extraCss + growJs +
+      "<script>window.addEventListener('load'," + micFn.toString() + ");<\/script>" +
+      "<script>window.addEventListener('load'," + voiceFn.toString() + ");<\/script>";
+    document.open();
+    document.write(html);
+    document.close();
+  })
+  .catch(function () {
+    document.getElementById("msg").textContent = "Cannot load Sarah. Check that the deployment access is set to Anyone.";
+  });
+</script>
+</body>
+</html><!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sarah AI</title>
+<style>body{margin:0;background:#0f1b33;color:#fff;font-family:sans-serif;padding:24px}</style>
+</head>
+<body>
+<p id="msg">Loading Sarah...</p>
+<script>
+var API = "https://script.google.com/macros/s/AKfycbwdVMu1S09SCiLfGuRbagysR5Nc167Yf4mIqqfXIalhekXw4ZNYG3Oo1u_E6att__4D/exec";
+
+function shimFn(API) {
+  function cleanMath(s) {
+    if (typeof s !== "string") return s;
+    var SUP = {"0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹","+":"⁺","-":"⁻","=":"⁼","(":"⁽",")":"⁾","n":"ⁿ","i":"ⁱ"};
+    var SUB = {"0":"₀","1":"₁","2":"₂","3":"₃","4":"₄","5":"₅","6":"₆","7":"₇","8":"₈","9":"₉","+":"₊","-":"₋","=":"₌","(":"₍",")":"₎"};
+    var SYM = {pi:"π",theta:"θ",alpha:"α",beta:"β",gamma:"γ",delta:"δ",Delta:"Δ",lambda:"λ",mu:"μ",omega:"ω",Omega:"Ω",sigma:"σ",rho:"ρ",phi:"φ",epsilon:"ε",
+      times:"×",cdot:"·",div:"÷",pm:"±",mp:"∓",leq:"≤",le:"≤",geq:"≥",ge:"≥",neq:"≠",ne:"≠",approx:"≈",equiv:"≡",
+      rightarrow:"→",to:"→",leftarrow:"←",Rightarrow:"⇒",leftrightarrow:"↔",rightleftharpoons:"⇌",
+      infty:"∞",sqrt:"√",circ:"°",degree:"°",sum:"Σ",int:"∫",propto:"∝",therefore:"∴",
+      left:"",right:"",quad:" ",qquad:"  ",displaystyle:"",ldots:"...",dots:"..."};
+    function conv(str, M) {
+      var o = "";
+      for (var i = 0; i < str.length; i++) {
+        var c = str.charAt(i);
+        if (!M[c]) return null;
+        o += M[c];
+      }
+      return o;
+    }
+    s = s.replace(/\$\$?([^$]+?)\$\$?/g, function (m, inner) {
+      return (/[\\^_{}]/.test(inner) || /^[A-Za-z]{1,2}$/.test(inner.trim())) ? inner : m;
+    });
+    s = s.replace(/\\\[|\\\]|\\\(|\\\)/g, "");
+    for (var k = 0; k < 3; k++) {
+      s = s.replace(/\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, "($1)/($2)");
+    }
+    s = s.replace(/\\sqrt\s*\{([^{}]*)\}/g, "√($1)");
+    s = s.replace(/\\(?:text|mathrm|mathbf|textbf|operatorname)\s*\{([^{}]*)\}/g, "$1");
+    s = s.replace(/\\[,;!: ]/g, " ").replace(/\\%/g, "%");
+    s = s.replace(/\\([A-Za-z]+)/g, function (m, n) {
+      return SYM.hasOwnProperty(n) ? SYM[n] : n;
+    });
+    s = s.replace(/\^\{([^{}]*)\}/g, function (m, x) {
+      var r = conv(x, SUP);
+      return r === null ? "^(" + x + ")" : r;
+    });
+    s = s.replace(/\^([0-9n])/g, function (m, x) { return SUP[x]; });
+    s = s.replace(/_\{([^{}]*)\}/g, function (m, x) {
+      var r = conv(x, SUB);
+      return r === null ? "_(" + x + ")" : r;
+    });
+    s = s.replace(/([A-Za-z\)\]])_([0-9])/g, function (m, a, x) { return a + SUB[x]; });
+    return s;
+  }
+  function make(ok, fail) {
+    return new Proxy({}, {
+      get: function (t, name) {
+        if (name === "withSuccessHandler") return function (f) { return make(f, fail); };
+        if (name === "withFailureHandler") return function (f) { return make(ok, f); };
+        if (name === "withUserObject") return function () { return make(ok, fail); };
+        return function () {
+          var args = Array.prototype.slice.call(arguments);
+          fetch(API, { method: "POST", body: JSON.stringify({ fn: name, args: args }) })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+              if (d && d.error) { if (fail) fail(new Error(d.error)); }
+              else if (ok) {
+                try { if (d && typeof d.answer === "string") d.answer = cleanMath(d.answer); } catch (e) {}
+                ok(d);
+              }
             })
             .catch(function (e) { if (fail) fail(e); });
         };
