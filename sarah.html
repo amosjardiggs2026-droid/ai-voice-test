@@ -73,12 +73,26 @@ function shimFn(API) {
   }
   var LOC = /\b(?:where am i|where i am|my (?:current |exact |present )?location|my (?:current )?position|what is my location|where are we now)\b/i;
   function handleLocation(ok) {
-    function done(text) { if (ok) ok({ source: "Device location", answer: text }); }
+    var finished = false;
+    function done(text) {
+      if (finished) return;
+      finished = true;
+      if (ok) ok({ source: "Device location", answer: text });
+    }
     if (!navigator.geolocation) { done("This device or browser cannot share its location."); return; }
     navigator.geolocation.getCurrentPosition(function (p) {
       var la = p.coords.latitude.toFixed(6), lo = p.coords.longitude.toFixed(6);
       var acc = Math.round(p.coords.accuracy || 0);
-      done("Your location is at latitude " + la + " and longitude " + lo + (acc ? " (accurate to about " + acc + " meters)" : "") + ".\nOpen it in Google Maps: https://www.google.com/maps/search/?api=1&query=" + la + "," + lo);
+      var local = "Your location is at latitude " + la + " and longitude " + lo + (acc ? " (accurate to about " + acc + " meters)" : "") + ".\nOpen it in Google Maps: https://www.google.com/maps/search/?api=1&query=" + la + "," + lo;
+      var timer = setTimeout(function () { done(local); }, 8000);
+      var cmd = "__mylocation " + la + "," + lo + (acc ? "," + acc : "");
+      fetch(API, { method: "POST", body: JSON.stringify({ fn: "askSarah", args: [cmd, "Student", []] }) })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          clearTimeout(timer);
+          done(d && typeof d.answer === "string" && d.answer ? cleanMath(d.answer) : local);
+        })
+        .catch(function () { clearTimeout(timer); done(local); });
     }, function (err) {
       if (err && err.code === 1) done("Location permission was denied. Please allow location for this page in your browser settings, then ask again.");
       else done("I could not get your location. Please turn on your device location and try again.");
