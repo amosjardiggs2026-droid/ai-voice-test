@@ -10,6 +10,8 @@
 <p id="msg">Loading Sarah...</p>
 <script>
 var API = "https://script.google.com/macros/s/AKfycbwdVMu1S09SCiLfGuRbagysR5Nc167Yf4mIqqfXIalhekXw4ZNYG3Oo1u_E6att__4D/exec";
+var CLIENT_ID = "1060896054218-fmsj7010rmv8n2kqs0cv8cd5gbpcjt38.apps.googleusercontent.com";
+var LOGIN_GATE = true;
 
 function shimFn(API) {
   function cleanMath(s) {
@@ -86,7 +88,7 @@ function shimFn(API) {
       var local = "Your location is at latitude " + la + " and longitude " + lo + (acc ? " (accurate to about " + acc + " meters)" : "") + ".\nOpen it in Google Maps: https://www.google.com/maps/search/?api=1&query=" + la + "," + lo;
       var timer = setTimeout(function () { done(local); }, 8000);
       var cmd = "__mylocation " + la + "," + lo + (acc ? "," + acc : "");
-      fetch(API, { method: "POST", body: JSON.stringify({ fn: "askSarah", args: [cmd, "Student", []] }) })
+      fetch(API, { method: "POST", body: JSON.stringify({ fn: "askSarah", args: [cmd, "Student", []], token: window.__sarahToken || "" }) })
         .then(function (r) { return r.json(); })
         .then(function (d) {
           clearTimeout(timer);
@@ -110,9 +112,12 @@ function shimFn(API) {
             handleLocation(ok);
             return;
           }
-          fetch(API, { method: "POST", body: JSON.stringify({ fn: name, args: args }) })
+          fetch(API, { method: "POST", body: JSON.stringify({ fn: name, args: args, token: window.__sarahToken || "" }) })
             .then(function (r) { return r.json(); })
             .then(function (d) {
+              if (d && d.needLogin) {
+                try { window.__showLogin("Your sign-in ended. Please sign in again."); } catch (e) {}
+              }
               if (d && d.error) { if (fail) fail(new Error(d.error)); }
               else if (ok) {
                 try { if (d && typeof d.answer === "string") d.answer = cleanMath(d.answer); } catch (e) {}
@@ -125,6 +130,132 @@ function shimFn(API) {
     });
   }
   window.google = { script: { run: make(null, null), host: { close: function () {}, setHeight: function () {} } } };
+}
+
+function loginFn(CLIENT_ID, API, GATE) {
+  if (!GATE) return;
+  var KEY = "sarahToken";
+  var savedScript = window.google && window.google.script;
+  function restore() {
+    try { if (window.google && !window.google.script && savedScript) window.google.script = savedScript; } catch (e) {}
+  }
+  var gs = document.createElement("script");
+  gs.id = "gsiScript";
+  gs.src = "https://accounts.google.com/gsi/client";
+  gs.async = true;
+  gs.onload = restore;
+  (document.head || document.body).appendChild(gs);
+
+  var ov = document.createElement("div");
+  ov.style.cssText = "position:fixed;left:0;top:0;right:0;bottom:0;background:#0f1b33;z-index:100000;display:none;flex-direction:column;align-items:center;justify-content:center;padding:24px;text-align:center;font-family:sans-serif;color:#fff";
+  var logo = document.createElement("div");
+  logo.textContent = "S";
+  logo.style.cssText = "width:56px;height:56px;border-radius:14px;background:#f5b53f;color:#0f1b33;font-weight:700;font-size:30px;line-height:56px;margin-bottom:14px";
+  var title = document.createElement("div");
+  title.textContent = "Sarah AI";
+  title.style.cssText = "font-size:22px;font-weight:700;margin-bottom:8px";
+  var txt = document.createElement("div");
+  txt.textContent = "Please sign in with your Google account to use Sarah.";
+  txt.style.cssText = "max-width:420px;font-size:15px;color:#c9d5ee;margin-bottom:18px";
+  var box = document.createElement("div");
+  var msg = document.createElement("div");
+  msg.style.cssText = "max-width:420px;font-size:13px;color:#f5a54a;margin-top:14px;min-height:18px";
+  ov.appendChild(logo); ov.appendChild(title); ov.appendChild(txt); ov.appendChild(box); ov.appendChild(msg);
+  document.body.appendChild(ov);
+
+  var chip = document.createElement("div");
+  chip.style.cssText = "position:fixed;left:10px;bottom:6px;font:11px sans-serif;color:#9fb0d0;z-index:9999;display:none";
+  document.body.appendChild(chip);
+
+  function decode(t) {
+    try {
+      var p = t.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+      while (p.length % 4) p += "=";
+      return JSON.parse(decodeURIComponent(escape(atob(p))));
+    } catch (e) { return null; }
+  }
+  function expired(t) {
+    var d = decode(t);
+    return !d || !d.exp || d.exp * 1000 < Date.now() + 60000;
+  }
+  function signOut() {
+    try { localStorage.removeItem(KEY); } catch (e) {}
+    window.__sarahToken = "";
+    try { window.google.accounts.id.disableAutoSelect(); } catch (e) {}
+    location.reload();
+  }
+  function setChip(info) {
+    chip.textContent = "Signed in as " + (info.name || info.email) + " · ";
+    var a = document.createElement("a");
+    a.textContent = "Sign out";
+    a.href = "#";
+    a.style.cssText = "color:#f5a54a;text-decoration:underline";
+    a.onclick = function (ev) { ev.preventDefault(); signOut(); };
+    chip.appendChild(a);
+    chip.style.display = "block";
+  }
+  var inited = false;
+  function render() {
+    var tries = 0;
+    (function wait() {
+      if (window.google && window.google.accounts && window.google.accounts.id) {
+        restore();
+        if (!inited) {
+          window.google.accounts.id.initialize({
+            client_id: CLIENT_ID,
+            auto_select: false,
+            callback: function (resp) { if (resp && resp.credential) verify(resp.credential); }
+          });
+          inited = true;
+        }
+        box.textContent = "";
+        window.google.accounts.id.renderButton(box, { theme: "filled_blue", size: "large", text: "signin_with", shape: "pill" });
+      } else if (++tries < 50) {
+        setTimeout(wait, 200);
+      } else {
+        msg.textContent = "Could not load Google sign-in. Check your internet and reload the page.";
+      }
+    })();
+  }
+  function showLogin(text) {
+    window.__sarahToken = "";
+    try { localStorage.removeItem(KEY); } catch (e) {}
+    chip.style.display = "none";
+    msg.textContent = text || "";
+    ov.style.display = "flex";
+    render();
+  }
+  window.__showLogin = showLogin;
+  function verify(token) {
+    msg.textContent = "Checking your account...";
+    ov.style.display = "flex";
+    fetch(API, { method: "POST", body: JSON.stringify({ fn: "__login", token: token }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && d.ok) {
+          window.__sarahToken = token;
+          try { localStorage.setItem(KEY, token); } catch (e) {}
+          msg.textContent = "";
+          ov.style.display = "none";
+          setChip(d);
+        } else {
+          window.__sarahToken = "";
+          try { localStorage.removeItem(KEY); } catch (e) {}
+          try { window.google.accounts.id.disableAutoSelect(); } catch (e) {}
+          msg.textContent = (d && d.error) ? d.error : "Sign-in failed. Please try again.";
+          render();
+        }
+      })
+      .catch(function () {
+        msg.textContent = "Could not reach Sarah. Check your internet and try again.";
+        render();
+      });
+  }
+
+  var saved = null;
+  try { saved = localStorage.getItem(KEY); } catch (e) {}
+  if (saved && !expired(saved)) verify(saved);
+  else showLogin("");
 }
 
 function micFn() {
@@ -386,7 +517,8 @@ fetch(API, { method: "POST", body: JSON.stringify({ fn: "__page" }) })
       page + extraCss + growJs +
       "<script>window.addEventListener('load'," + micFn.toString() + ");<\/script>" +
       "<script>window.addEventListener('load'," + voiceFn.toString() + ");<\/script>" +
-      "<script>window.addEventListener('load'," + linkFn.toString() + ");<\/script>";
+      "<script>window.addEventListener('load'," + linkFn.toString() + ");<\/script>" +
+      "<script>window.addEventListener('load',function(){(" + loginFn.toString() + ")(" + JSON.stringify(CLIENT_ID) + "," + JSON.stringify(API) + "," + (LOGIN_GATE ? "true" : "false") + ");});<\/script>";
     document.open();
     document.write(html);
     document.close();
