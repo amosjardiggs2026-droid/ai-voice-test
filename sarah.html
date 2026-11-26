@@ -242,7 +242,8 @@ function voiceFn() {
   window.speak = function (text) {
     window.stopSpeaking();
     var my = token;
-    var clean = String(text).replace(/\*\*/g, "");
+    var clean = String(text).replace(/\*\*/g, "").replace(/https?:\/\/\S+/g, "").trim();
+    if (!clean) return;
     google.script.run
       .withSuccessHandler(function (res) {
         if (my !== token) return;
@@ -283,6 +284,60 @@ function voiceFn() {
   }
 }
 
+function linkFn() {
+  var URLRE = /https?:\/\/[^\s<>"']+/g;
+  function linkify(root) {
+    try {
+      var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+      var nodes = [], n;
+      while ((n = walker.nextNode())) {
+        if (n.nodeValue.indexOf("http") < 0) continue;
+        var p = n.parentNode;
+        if (!p || !p.closest || p.closest("a, script, style, textarea, select")) continue;
+        nodes.push(n);
+      }
+      nodes.forEach(function (node) {
+        var text = node.nodeValue, last = 0, m, found = false;
+        var frag = document.createDocumentFragment();
+        URLRE.lastIndex = 0;
+        while ((m = URLRE.exec(text)) !== null) {
+          var url = m[0];
+          var t = url.match(/[.,;:!?)\]]+$/);
+          if (t) url = url.slice(0, url.length - t[0].length);
+          if (!url) continue;
+          found = true;
+          frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+          var a = document.createElement("a");
+          a.href = url;
+          a.textContent = url;
+          a.target = "_blank";
+          a.rel = "noopener noreferrer";
+          a.style.cssText = "color:#f5a54a;text-decoration:underline;word-break:break-all";
+          frag.appendChild(a);
+          last = m.index + url.length;
+          URLRE.lastIndex = last;
+        }
+        if (!found) return;
+        frag.appendChild(document.createTextNode(text.slice(last)));
+        node.parentNode.replaceChild(frag, node);
+      });
+    } catch (e) {}
+  }
+  try {
+    var obs = new MutationObserver(function (muts) {
+      muts.forEach(function (mu) {
+        for (var i = 0; i < mu.addedNodes.length; i++) {
+          var nd = mu.addedNodes[i];
+          if (nd.nodeType === 1) linkify(nd);
+          else if (nd.nodeType === 3 && nd.parentNode) linkify(nd.parentNode);
+        }
+      });
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+    linkify(document.body);
+  } catch (e) {}
+}
+
 var extraCss = "<style>.bar textarea{flex:1;background:transparent;border:0;outline:0;color:var(--text);font-size:16px;font-family:inherit;line-height:1.4;padding:10px 6px;min-width:0;resize:none;max-height:220px;overflow-y:auto}.bar textarea::placeholder{color:var(--muted)}</style>";
 
 var growJs = "<script>(function(){var t=document.getElementById('question');if(!t||t.tagName!=='TEXTAREA')return;var last='';function g(){t.style.height='auto';t.style.height=Math.min(t.scrollHeight,220)+'px';}t.addEventListener('input',function(){last=t.value;g();});setInterval(function(){if(t.value!==last){last=t.value;g();}},250);g();})();<\/script>";
@@ -299,7 +354,8 @@ fetch(API, { method: "POST", body: JSON.stringify({ fn: "__page" }) })
     var html = "<script>(" + shimFn.toString() + ")(" + JSON.stringify(API) + ");<\/script>" +
       page + extraCss + growJs +
       "<script>window.addEventListener('load'," + micFn.toString() + ");<\/script>" +
-      "<script>window.addEventListener('load'," + voiceFn.toString() + ");<\/script>";
+      "<script>window.addEventListener('load'," + voiceFn.toString() + ");<\/script>" +
+      "<script>window.addEventListener('load'," + linkFn.toString() + ");<\/script>";
     document.open();
     document.write(html);
     document.close();
