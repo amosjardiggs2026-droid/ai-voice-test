@@ -71,6 +71,19 @@ function shimFn(API) {
     } catch (e) {}
     return s;
   }
+  var LOC = /\b(?:where am i|where i am|my (?:current |exact |present )?location|my (?:current )?position|what is my location|where are we now)\b/i;
+  function handleLocation(ok) {
+    function done(text) { if (ok) ok({ source: "Device location", answer: text }); }
+    if (!navigator.geolocation) { done("This device or browser cannot share its location."); return; }
+    navigator.geolocation.getCurrentPosition(function (p) {
+      var la = p.coords.latitude.toFixed(6), lo = p.coords.longitude.toFixed(6);
+      var acc = Math.round(p.coords.accuracy || 0);
+      done("Your location is at latitude " + la + " and longitude " + lo + (acc ? " (accurate to about " + acc + " meters)" : "") + ".\nOpen it in Google Maps: https://www.google.com/maps/search/?api=1&query=" + la + "," + lo);
+    }, function (err) {
+      if (err && err.code === 1) done("Location permission was denied. Please allow location for this page in your browser settings, then ask again.");
+      else done("I could not get your location. Please turn on your device location and try again.");
+    }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+  }
   function make(ok, fail) {
     return new Proxy({}, {
       get: function (t, name) {
@@ -79,6 +92,10 @@ function shimFn(API) {
         if (name === "withUserObject") return function () { return make(ok, fail); };
         return function () {
           var args = Array.prototype.slice.call(arguments);
+          if (name === "askSarah" && typeof args[0] === "string" && LOC.test(args[0])) {
+            handleLocation(ok);
+            return;
+          }
           fetch(API, { method: "POST", body: JSON.stringify({ fn: name, args: args }) })
             .then(function (r) { return r.json(); })
             .then(function (d) {
